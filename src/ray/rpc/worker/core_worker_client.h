@@ -8,6 +8,7 @@
 
 #include <grpcpp/grpcpp.h>
 #include "absl/base/thread_annotations.h"
+#include "absl/hash/hash.h"
 
 #include "ray/common/status.h"
 #include "ray/rpc/client_call.h"
@@ -32,6 +33,33 @@ const static int64_t RequestSizeInBytes(const PushTaskRequest &request) {
   }
   return size;
 }
+
+// Shared between direct actor and task submitters.
+class CoreWorkerClientInterface;
+
+// TODO(swang): Remove and replace with rpc::Address.
+class WorkerAddress {
+ public:
+  template <typename H>
+  friend H AbslHashValue(H h, const WorkerAddress &w) {
+    return H::combine(std::move(h), w.ip_address, w.port, w.worker_id);
+  }
+
+  bool operator==(const WorkerAddress &other) const {
+    return other.ip_address == ip_address && other.port == port &&
+           other.worker_id == worker_id;
+  }
+
+  /// The ip address of the worker.
+  const std::string ip_address;
+  /// The local port of the worker.
+  const int port;
+  /// The unique id of the worker.
+  const WorkerID worker_id;
+};
+
+typedef std::function<std::shared_ptr<CoreWorkerClientInterface>(const WorkerAddress &)>
+    ClientFactoryFn;
 
 /// Abstract client interface for testing.
 class CoreWorkerClientInterface {
@@ -74,14 +102,10 @@ class CoreWorkerClientInterface {
     return Status::NotImplemented("");
   }
 
-  /// Grants a worker to the client.
-  ///
-  /// \param[in] request The request message.
-  /// \param[in] callback The callback function that handles reply.
-  /// \return if the rpc call succeeds
-  virtual ray::Status WorkerLeaseGranted(
-      const WorkerLeaseGrantedRequest &request,
-      const ClientCallback<WorkerLeaseGrantedReply> &callback) {
+  /// Ask the owner of an object about the object's current status.
+  virtual ray::Status GetObjectStatus(
+      const GetObjectStatusRequest &request,
+      const ClientCallback<GetObjectStatusReply> &callback) {
     return Status::NotImplemented("");
   }
 
@@ -152,17 +176,14 @@ class CoreWorkerClient : public std::enable_shared_from_this<CoreWorkerClient>,
     return call->GetStatus();
   }
 
-  ray::Status WorkerLeaseGranted(
-      const WorkerLeaseGrantedRequest &request,
-      const ClientCallback<WorkerLeaseGrantedReply> &callback) override {
-    auto call =
-        client_call_manager_.CreateCall<CoreWorkerService, WorkerLeaseGrantedRequest,
-                                        WorkerLeaseGrantedReply>(
-            *stub_, &CoreWorkerService::Stub::PrepareAsyncWorkerLeaseGranted, request,
-            callback);
+  virtual ray::Status GetObjectStatus(
+      const GetObjectStatusRequest &request,
+      const ClientCallback<GetObjectStatusReply> &callback) override {
+    auto call = client_call_manager_.CreateCall<CoreWorkerService, GetObjectStatusRequest,
+                                                GetObjectStatusReply>(
+        *stub_, &CoreWorkerService::Stub::PrepareAsyncGetObjectStatus, request, callback);
     return call->GetStatus();
   }
-
   /// Send as many pending tasks as possible. This method is thread-safe.
   ///
   /// The client will guarantee no more than kMaxBytesInFlight bytes of RPCs are being

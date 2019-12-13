@@ -654,17 +654,6 @@ class JobTable : public Log<JobID, JobTableData> {
   };
 
   virtual ~JobTable() {}
-
-  /// Appends job data to the job table.
-  ///
-  /// \param job_id The job id.
-  /// \param is_dead Whether the job is dead.
-  /// \param timestamp The UNIX timestamp when the driver was started/stopped.
-  /// \param node_manager_address IP address of the node the driver is running on.
-  /// \param driver_pid Process ID of the driver process.
-  /// \return The return status.
-  Status AppendJobData(const JobID &job_id, bool is_dead, int64_t timestamp,
-                       const std::string &node_manager_address, int64_t driver_pid);
 };
 
 /// Actor table starts with an ALIVE entry, which represents the first time the actor
@@ -860,6 +849,10 @@ class ClientTable : public Log<ClientID, GcsNodeInfo> {
   /// \return Status
   ray::Status Disconnect(const DisconnectCallback &callback = nullptr);
 
+  /// Whether the client is disconnected from the GCS.
+  /// \return Whether the client is disconnected.
+  bool IsDisconnected() const;
+
   /// Mark a different client as disconnected. The client ID should never be
   /// reused for a new client.
   ///
@@ -881,11 +874,11 @@ class ClientTable : public Log<ClientID, GcsNodeInfo> {
   /// information for clients that we've heard a notification for.
   ///
   /// \param client The client to get information about.
-  /// \param node_info A reference to the client information. If we have information
-  /// about the client in the cache, then the reference will be modified to
-  /// contain that information. Else, the reference will be updated to contain
+  /// \param node_info The client information will be copied here if
+  /// we have the client in the cache.
   /// a nil client ID.
-  void GetClient(const ClientID &client, GcsNodeInfo &node_info) const;
+  /// \return Whether teh client is in the cache.
+  bool GetClient(const ClientID &client, GcsNodeInfo *node_info) const;
 
   /// Get the local client's ID.
   ///

@@ -158,6 +158,14 @@ ObjectID ObjectID::WithTransportType(TaskTransportType transport_type) const {
   return copy;
 }
 
+ObjectID ObjectID::WithPlasmaTransportType() const {
+  return WithTransportType(TaskTransportType::RAYLET);
+}
+
+ObjectID ObjectID::WithDirectTransportType() const {
+  return WithTransportType(TaskTransportType::DIRECT);
+}
+
 uint8_t ObjectID::GetTransportType() const {
   return ::ray::GetTransportType(this->GetFlags());
 }
@@ -290,10 +298,6 @@ TaskID TaskID::ComputeDriverTaskId(const WorkerID &driver_id) {
 }
 
 TaskID ObjectID::TaskId() const {
-  if (!CreatedByTask()) {
-    // TODO(qwang): Should be RAY_CHECK here.
-    RAY_LOG(WARNING) << "Shouldn't call this on a non-task object id: " << this->Hex();
-  }
   return TaskID::FromBinary(
       std::string(reinterpret_cast<const char *>(id_), TaskID::Size()));
 }
@@ -356,7 +360,7 @@ ObjectID ObjectID::GenerateObjectId(const std::string &task_id_binary,
   return ret;
 }
 
-JobID JobID::FromInt(uint32_t value) {
+JobID JobID::FromInt(uint16_t value) {
   std::vector<uint8_t> data(JobID::Size(), 0);
   std::memcpy(data.data(), &value, JobID::Size());
   return JobID::FromBinary(

@@ -311,10 +311,6 @@ class Worker(object):
                     "which is not an ray.ObjectID.".format(object_id))
 
         if self.mode == LOCAL_MODE:
-            # TODO(ujvl): Remove check when local mode moved to core worker.
-            if timeout is not None:
-                raise ValueError(
-                    "`get` must be called with timeout=None in local mode.")
             return self.local_mode_manager.get_objects(object_ids)
 
         timeout_ms = int(timeout * 1000) if timeout else -1
@@ -728,9 +724,13 @@ def init(address=None,
         )
         # Start the Ray processes. We set shutdown_at_exit=False because we
         # shutdown the node in the ray.shutdown call that happens in the atexit
-        # handler.
+        # handler. We still spawn a reaper process in case the atexit handler
+        # isn't called.
         _global_node = ray.node.Node(
-            head=True, shutdown_at_exit=False, ray_params=ray_params)
+            head=True,
+            shutdown_at_exit=False,
+            spawn_reaper=True,
+            ray_params=ray_params)
     else:
         # In this case, we are connecting to an existing cluster.
         if num_cpus is not None or num_gpus is not None:
@@ -783,7 +783,11 @@ def init(address=None,
             load_code_from_local=load_code_from_local,
             use_pickle=use_pickle)
         _global_node = ray.node.Node(
-            ray_params, head=False, shutdown_at_exit=False, connect_only=True)
+            ray_params,
+            head=False,
+            shutdown_at_exit=False,
+            spawn_reaper=False,
+            connect_only=True)
 
     connect(
         _global_node,
@@ -791,7 +795,9 @@ def init(address=None,
         log_to_driver=log_to_driver,
         worker=global_worker,
         driver_object_store_memory=driver_object_store_memory,
-        job_id=job_id)
+        job_id=job_id,
+        internal_config=json.loads(_internal_config)
+        if _internal_config else {})
 
     for hook in _post_init_hooks:
         hook()
@@ -850,7 +856,11 @@ def sigterm_handler(signum, frame):
     sys.exit(signal.SIGTERM)
 
 
-signal.signal(signal.SIGTERM, sigterm_handler)
+try:
+    signal.signal(signal.SIGTERM, sigterm_handler)
+except ValueError:
+    logger.warning("Failed to set SIGTERM handler, processes might"
+                   "not be cleaned up properly on exit.")
 
 # Define a custom excepthook so that if the driver exits with an exception, we
 # can push that exception to Redis.
@@ -1056,7 +1066,8 @@ def connect(node,
             log_to_driver=False,
             worker=global_worker,
             driver_object_store_memory=None,
-            job_id=None):
+            job_id=None,
+            internal_config=None):
     """Connect this worker to the raylet, to Plasma, and to Redis.
 
     Args:
@@ -1069,6 +1080,8 @@ def connect(node,
         driver_object_store_memory: Limit the amount of memory the driver can
             use in the object store when creating objects.
         job_id: The ID of job. If it's None, then we will generate one.
+        internal_config: Dictionary of (str,str) containing internal config
+            options to override the defaults.
     """
     # Do some basic checking to make sure we didn't call ray.init twice.
     error_message = "Perhaps you called ray.init twice by accident?"
@@ -1078,6 +1091,8 @@ def connect(node,
     # Enable nice stack traces on SIGSEGV etc.
     if not faulthandler.is_enabled():
         faulthandler.enable(all_threads=False)
+
+    ray._raylet.set_internal_config(internal_config)
 
     if mode is not LOCAL_MODE:
         # Create a Redis client to primary.
@@ -1094,11 +1109,10 @@ def connect(node,
         # TODO(qwang): Rename this to `worker_id_str` or type to `WorkerID`
         worker.worker_id = _random_string()
         if setproctitle:
-            setproctitle.setproctitle("ray_worker")
+            setproctitle.setproctitle("ray::IDLE")
     elif mode is LOCAL_MODE:
-        # Code path of local mode
         if job_id is None:
-            job_id = JobID.from_int(random.randint(1, 100000))
+            job_id = JobID.from_int(random.randint(1, 65535))
         worker.worker_id = ray.utils.compute_driver_id_from_job(
             job_id).binary()
     else:
@@ -1407,8 +1421,8 @@ def get(object_ids, timeout=None):
     Args:
         object_ids: Object ID of the object to get or a list of object IDs to
             get.
-        timeout (float): The maximum amount of time in seconds to wait before
-            returning.
+        timeout (Optional[float]): The maximum amount of time in seconds to
+            wait before returning.
 
     Returns:
         A Python object or a list of Python objects.
@@ -1613,6 +1627,7 @@ def make_decorator(num_return_vals=None,
                    object_store_memory=None,
                    resources=None,
                    max_calls=None,
+                   max_retries=None,
                    max_reconstructions=None,
                    worker=None):
     def decorator(function_or_class):
@@ -1625,7 +1640,8 @@ def make_decorator(num_return_vals=None,
 
             return ray.remote_function.RemoteFunction(
                 function_or_class, num_cpus, num_gpus, memory,
-                object_store_memory, resources, num_return_vals, max_calls)
+                object_store_memory, resources, num_return_vals, max_calls,
+                max_retries)
 
         if inspect.isclass(function_or_class):
             if num_return_vals is not None:
@@ -1724,6 +1740,7 @@ def remote(*args, **kwargs):
             "resources",
             "max_calls",
             "max_reconstructions",
+            "max_retries",
         ], error_string
 
     num_cpus = kwargs["num_cpus"] if "num_cpus" in kwargs else None
@@ -1743,6 +1760,7 @@ def remote(*args, **kwargs):
     max_reconstructions = kwargs.get("max_reconstructions")
     memory = kwargs.get("memory")
     object_store_memory = kwargs.get("object_store_memory")
+    max_retries = kwargs.get("max_retries")
 
     return make_decorator(
         num_return_vals=num_return_vals,
@@ -1753,4 +1771,5 @@ def remote(*args, **kwargs):
         resources=resources,
         max_calls=max_calls,
         max_reconstructions=max_reconstructions,
+        max_retries=max_retries,
         worker=worker)
